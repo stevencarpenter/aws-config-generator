@@ -13,7 +13,7 @@ jobs:
     name: Build and publish GitHub Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # hatch-vcs derives the version from the full tag history.
           fetch-depth: 0

@@ -25,7 +25,7 @@ jobs:
         # (see .python-version); 3.14 is the standard interpreter.
         python: ["3.14", "3.14t"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.3.2
