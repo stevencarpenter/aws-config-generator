@@ -14,7 +14,7 @@ existing `~/.aws/config` without disrupting manual entries, and supports filteri
 - **Human-friendly naming**: Shortens account names and role names using a checked-in generator config
 - **Smart profile naming**: Single-role accounts get simple names; multi-role accounts add role suffixes (e.g., `prod`, `prod-admin`)
 - **Non-destructive merge**: Preserves manually edited profiles using marker-based insertion
-- **Zero dependencies**: Pure Python 3.14+ with no external runtime dependencies
+- **Zero dependencies**: Pure Python 3.10+ with no external runtime dependencies
 - **Token-aware**: Checks SSO token validity and provides helpful error messages
 - **Dry-run mode**: Preview generated profiles before writing
 
@@ -310,8 +310,8 @@ test suite, builds the sdist + wheel with `uv build`, and publishes a GitHub
 Release with auto-generated notes and the built artifacts attached.
 
 Continuous integration (`.github/workflows/ci.yml`) runs lint, format check, and
-the test suite on every push and pull request against Python 3.14 and 3.14t
-(free-threaded).
+the test suite on every push and pull request against Python 3.10 through 3.14,
+including 3.14t (free-threaded).
 
 Users install a released version with:
 

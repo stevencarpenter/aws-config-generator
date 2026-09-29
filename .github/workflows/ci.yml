@@ -21,9 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.14t is the free-threaded build this tool is developed against
-        # (see .python-version); 3.14 is the standard interpreter.
-        python: ["3.14", "3.14t"]
+        # 3.10 is the minimum supported version; 3.14t is the free-threaded
+        # build this tool is developed against (see .python-version).
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v7
 
