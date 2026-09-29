@@ -1,0 +1,60 @@
+name: Homebrew
+
+# Guards the tap: a broken Formula/ would make `brew install` fail for every
+# user, and formula bugs are invisible to the Python test suite.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Formula/**"
+      - ".github/workflows/brew.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Formula/**"
+      - ".github/workflows/brew.yml"
+  # Catch upstream breakage (e.g. python@3.14 being removed) without a push.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: brew-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  formula:
+    name: audit + install + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      # `brew` only loads formulae from a tap, so expose this checkout as one.
+      - name: Tap this repository
+        run: |
+          tap_dir="$(brew --repository)/Library/Taps/${GITHUB_REPOSITORY%%/*}/homebrew-${GITHUB_REPOSITORY##*/}"
+          mkdir -p "$(dirname "$tap_dir")"
+          ln -s "$GITHUB_WORKSPACE" "$tap_dir"
+          brew tap-info "${GITHUB_REPOSITORY%%/*}/${GITHUB_REPOSITORY##*/}"
+
+      - name: Audit formula
+        run: brew audit --strict --online --formula "${GITHUB_REPOSITORY%%/*}/${GITHUB_REPOSITORY##*/}/aws-config-gen"
+
+      - name: Install from source
+        run: brew install --build-from-source --verbose "${GITHUB_REPOSITORY%%/*}/${GITHUB_REPOSITORY##*/}/aws-config-gen"
+
+      - name: Run formula test block
+        run: brew test --verbose "${GITHUB_REPOSITORY%%/*}/${GITHUB_REPOSITORY##*/}/aws-config-gen"
+
+      - name: Check for linkage problems
+        run: brew linkage --test "${GITHUB_REPOSITORY%%/*}/${GITHUB_REPOSITORY##*/}/aws-config-gen"

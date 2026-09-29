@@ -49,3 +49,54 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+
+      # The sdist uploaded above is what Formula/aws-config-gen.rb points at,
+      # so its checksum is computed from the exact bytes just released.
+      - name: Record sdist checksum
+        id: sdist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          sdist="dist/aws_config_gen-${version}.tar.gz"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$sdist" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # This repo is its own Homebrew tap, so the formula has to be pointed at
+      # the new release. Committed to main (not the tag) since that is the ref
+      # `brew tap` reads.
+      - name: Bump Homebrew formula on main
+        env:
+          VERSION: ${{ steps.sdist.outputs.version }}
+          SHA256: ${{ steps.sdist.outputs.sha256 }}
+        run: |
+          # -f because earlier steps may have dirtied tracked files (e.g. uv
+          # touching uv.lock); the sdist checksum is already captured above.
+          git fetch origin main
+          git checkout -f main
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          url="${base}/aws_config_gen-${VERSION}.tar.gz"
+          python3 - "$url" "$SHA256" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          url, sha256 = sys.argv[1], sys.argv[2]
+          path = pathlib.Path("Formula/aws-config-gen.rb")
+          text = path.read_text()
+          text = re.sub(r'^  url ".*"$', f'  url "{url}"', text, count=1, flags=re.M)
+          text = re.sub(
+              r'^  sha256 ".*"$', f'  sha256 "{sha256}"', text, count=1, flags=re.M
+          )
+          path.write_text(text)
+          PY
+          if git diff --quiet -- Formula/aws-config-gen.rb; then
+            echo "Formula already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/aws-config-gen.rb
+          git commit -m "brew: bump formula to ${VERSION}"
+          git push origin main
+

@@ -20,7 +20,47 @@ existing `~/.aws/config` without disrupting manual entries, and supports filteri
 
 ## Installation
 
-Install from source via `uv`:
+### Homebrew
+
+This repository is also its own Homebrew tap. Because the repo is not named
+`homebrew-*`, pass the URL when tapping:
+
+```bash
+brew tap stevencarpenter/aws-config-generator https://github.com/stevencarpenter/aws-config-generator
+brew install aws-config-gen
+```
+
+Or as a one-liner without a persistent tap:
+
+```bash
+brew install stevencarpenter/aws-config-generator/aws-config-gen
+```
+
+Upgrade and uninstall as usual:
+
+```bash
+brew update && brew upgrade aws-config-gen
+brew uninstall aws-config-gen
+```
+
+To track `main` instead of the latest release:
+
+```bash
+brew install --HEAD aws-config-gen
+```
+
+The formula builds into its own virtualenv against Homebrew's `python@3.14`, so
+it will not touch your system or `uv`-managed Python environments.
+
+### uv
+
+Install a released version as a standalone tool:
+
+```bash
+uv tool install git+https://github.com/stevencarpenter/aws-config-generator
+```
+
+### From source
 
 ```bash
 uv pip install --project .
@@ -241,6 +281,8 @@ aws_config_gen/
 │   ├── test_naming.py
 │   ├── test_sso_client.py
 │   └── test_sso_token.py
+├── Formula/
+│   └── aws-config-gen.rb     # Homebrew formula (this repo is its own tap)
 └── pyproject.toml            # Package metadata and dependencies
 ```
 
@@ -306,12 +348,36 @@ git push origin v0.1.0
 ```
 
 Pushing a `v*.*.*` tag triggers `.github/workflows/release.yml`, which runs the
-test suite, builds the sdist + wheel with `uv build`, and publishes a GitHub
-Release with auto-generated notes and the built artifacts attached.
+test suite, builds the sdist + wheel with `uv build`, publishes a GitHub
+Release with auto-generated notes and the built artifacts attached, and then
+commits an updated `Formula/aws-config-gen.rb` to `main` pointing at the new
+sdist and its checksum. No manual formula editing is required.
 
 Continuous integration (`.github/workflows/ci.yml`) runs lint, format check, and
 the test suite on every push and pull request against Python 3.14 and 3.14t
-(free-threaded).
+(free-threaded). `.github/workflows/brew.yml` separately audits, installs, and
+tests the formula on macOS and Linux whenever `Formula/` changes, plus weekly to
+catch upstream breakage.
+
+### Updating the formula by hand
+
+If you need to bump it outside the release workflow:
+
+```bash
+version=0.1.0
+url="https://github.com/stevencarpenter/aws-config-generator/releases/download/v${version}/aws_config_gen-${version}.tar.gz"
+curl -sSL "$url" | sha256sum
+```
+
+Put the `url` and `sha256` into `Formula/aws-config-gen.rb`, then verify:
+
+```bash
+brew audit --strict --online --formula ./Formula/aws-config-gen.rb
+```
+
+Note the formula points at the release **sdist**, not the git tag archive:
+`hatch-vcs` needs either git metadata or the `PKG-INFO` that only the sdist
+carries, so a tag archive would fail to build.
 
 Users install a released version with:
 
