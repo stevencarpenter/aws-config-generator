@@ -1,0 +1,37 @@
+{
+  "default_region": "us-west-2",
+
+  "role_short_names": {
+    "AdministratorAccess": "admin",
+    "PowerUserAccess": "power",
+    "ReadOnlyAccess": "ro"
+  },
+
+  "identity_centers": [
+    {
+      "sso_session": "my-sso",
+      "sso_start_url": "https://my-org.awsapps.com/start",
+      "sso_region": "us-east-1",
+      "account_names": {
+        "111111111111": "prod",
+        "222222222222": "staging"
+      },
+      "skip": [
+        ["222222222222", "AdministratorAccess"]
+      ]
+    },
+    {
+      "sso_session": "client-sso",
+      "sso_start_url": "https://client-org.awsapps.com/start",
+      "sso_region": "eu-west-1",
+      "default_region": "eu-central-1",
+      "profile_prefix": "client",
+      "account_names": {
+        "555555555555": "prod"
+      },
+      "role_short_names": {
+        "ReadOnlyAccess": "view"
+      }
+    }
+  ]
+}

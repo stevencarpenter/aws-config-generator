@@ -54,7 +54,7 @@ aws-config-gen
 --generator-config PATH    Path to overrides.json (default: ~/.config/aws-config-gen/overrides.json)
 --config PATH              Path to AWS config file (default: ~/.aws/config)
 --dry-run                  Print generated config to stdout; don't write
---strict                   Exit 1 on token failures (default: exit 0)
+--strict                   Exit 1 when discovery fails for any Identity Center (default: exit 0)
 ```
 
 ### Examples
@@ -71,7 +71,7 @@ Write to a test config file:
 aws-config-gen --config /tmp/test-aws-config
 ```
 
-Treat token failures as errors for CI:
+Treat discovery failures (expired token, network error) as errors for CI:
 
 ```bash
 aws-config-gen --strict
@@ -139,16 +139,72 @@ SSO session spanning many accounts, with one-to-many assumable roles per account
 - `role_short_names` (object): Map role names to shorter display names (optional)
 - `skip` (array): List of `[account_id, role_name]` pairs to exclude (optional)
 
+String values must not contain line breaks, and `sso_region`/`default_region` must be AWS region names
+(e.g. `us-east-1`). Generated profile names must not contain whitespace or brackets; if an `account_names` or
+`role_short_names` value would produce one, the run fails with an error naming the account and role.
+Unrecognized keys are ignored with a warning (with a "did you mean" hint for likely typos).
+
+### Multiple Identity Centers
+
+To generate profiles from several Identity Centers (e.g. your own org plus a client's), list them under
+`identity_centers`. Each entry becomes its own `[sso-session]` stanza in the managed block, followed by its profiles.
+See [`examples/overrides.multi.example.json`](examples/overrides.multi.example.json).
+
+```json
+{
+  "default_region": "us-west-2",
+  "role_short_names": { "AdministratorAccess": "admin", "ReadOnlyAccess": "ro" },
+  "identity_centers": [
+    {
+      "sso_session": "my-sso",
+      "sso_start_url": "https://my-org.awsapps.com/start",
+      "sso_region": "us-east-1",
+      "account_names": { "111111111111": "prod" }
+    },
+    {
+      "sso_session": "client-sso",
+      "sso_start_url": "https://client-org.awsapps.com/start",
+      "sso_region": "eu-west-1",
+      "default_region": "eu-central-1",
+      "profile_prefix": "client",
+      "account_names": { "555555555555": "prod" }
+    }
+  ]
+}
+```
+
+- Each entry requires `sso_session` (unique across entries, no whitespace or brackets), `sso_start_url` and
+  `sso_region`. Apart from `profile_prefix` (where `""` means no prefix), string settings must be non-empty,
+  single-line strings; surrounding whitespace is stripped. `sso_region` and `default_region` must be AWS region
+  names such as `us-east-1`.
+- `default_region`, `account_names`, `role_short_names` and `skip` can be set at the top level as shared defaults.
+  Per-entry `default_region` replaces the shared one, per-entry maps are merged over the shared maps, and per-entry
+  `skip` lists are appended to the shared list.
+- `profile_prefix` (string, optional) is lowercased, spaces become hyphens, leading/trailing hyphens are stripped,
+  and it is prepended with a hyphen to every profile from that Identity Center (`client-prod` above). A prefix with
+  no letters or digits (e.g. `"-"`) is rejected. All profile names share one `~/.aws/config`
+  namespace, so use it when two orgs would otherwise produce the same name. Duplicates are reported as an error.
+- `sso_session`, `sso_start_url`, `sso_region` and `profile_prefix` at the top level are ignored (with a warning)
+  when `identity_centers` is set; put them in an entry instead.
+- Each session needs its own login: `aws sso login --sso-session client-sso`.
+- If discovery fails for any Identity Center (expired token, network error), every failure is reported and
+  `~/.aws/config` is left unchanged. This keeps a partial run from removing the profiles of the failed Identity
+  Center. Exit code follows `--strict` as usual.
+
+The single-Identity-Center layout above (keys at the top level, no `identity_centers`) is still supported, and also
+accepts an optional top-level `profile_prefix`.
+
 ## How It Works
 
 ### Discovery Pipeline
 
-1. **Load SSO Token**: Reads cached bearer token from `~/.aws/sso/cache/` for the specified SSO session
-2. **Fetch Accounts**: Lists all accounts visible to your SSO session via the Identity Center API
+1. **Load SSO Token**: For each configured Identity Center, reads the cached bearer token from `~/.aws/sso/cache/`
+   for its SSO session
+2. **Fetch Accounts**: Lists all accounts visible to that SSO session via the Identity Center API
 3. **Fetch Roles**: For each account, lists all roles accessible to the SSO session
 4. **Apply Config**: Filters out any `(account_id, role_name)` pairs in the skip list
 5. **Build Profiles**: Generates profile names using configured account and role aliases; uses suffixes for multi-role
-   accounts
+   accounts, and applies the Identity Center's `profile_prefix` if set
 
 ### Profile Naming Logic
 
@@ -188,7 +244,9 @@ region = us-west-2
 # ... manual profiles below ...
 ```
 
-Any profiles inside the markers are replaced on the next run. Profiles outside the markers are preserved.
+Any profiles inside the markers are replaced on the next run. Profiles outside the markers are preserved. If a
+manual section outside the markers has the same name as a generated one, it is removed (a warning lists the absorbed
+sections); comments directly above the following section are kept.
 
 ## Development
 
@@ -232,6 +290,7 @@ aws_config_gen/
 │   ├── sso_client.py         # AWS Identity Center REST client
 │   ├── sso_token.py          # SSO token cache reader
 │   ├── config_writer.py      # AWS config file rendering and merge
+│   ├── errors.py             # Shared exceptions (DiscoveryDataError)
 │   └── types.py              # Data types (SSOAccount, AccountRole, etc.)
 ├── tests/
 │   ├── conftest.py           # Pytest fixtures

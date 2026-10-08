@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from aws_config_gen.errors import DiscoveryDataError
 from aws_config_gen.sso_token import (
     TokenExpiredError,
     TokenNotFoundError,
@@ -72,7 +73,7 @@ def test_malformed_json_raises(tmp_path: Path):
     path = tmp_path / f"{_cache_key(SESSION_NAME)}.json"
     path.write_text("{not valid json!!!")
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(DiscoveryDataError, match="Malformed token cache"):
         load_sso_token(SESSION_NAME, cache_dir=tmp_path)
 
 
@@ -82,7 +83,7 @@ def test_missing_access_token_key_raises(tmp_path: Path):
     del token_data["accessToken"]
     _write_token(tmp_path, SESSION_NAME, token_data)
 
-    with pytest.raises(KeyError):
+    with pytest.raises(DiscoveryDataError, match="KeyError"):
         load_sso_token(SESSION_NAME, cache_dir=tmp_path)
 
 
@@ -92,7 +93,7 @@ def test_missing_expires_at_key_raises(tmp_path: Path):
     del token_data["expiresAt"]
     _write_token(tmp_path, SESSION_NAME, token_data)
 
-    with pytest.raises(KeyError):
+    with pytest.raises(DiscoveryDataError, match="KeyError"):
         load_sso_token(SESSION_NAME, cache_dir=tmp_path)
 
 
@@ -107,3 +108,28 @@ def test_default_cache_dir_used(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
     result = load_sso_token(SESSION_NAME)
     assert result == "default-dir-token"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps(["not", "an", "object"]),
+        json.dumps({"accessToken": "t", "expiresAt": "not-a-timestamp"}),
+        json.dumps({"accessToken": 123, "expiresAt": "2099-01-01T00:00:00Z"}),
+    ],
+)
+def test_malformed_token_cache_raises_discovery_data_error(tmp_path: Path, content):
+    path = tmp_path / f"{_cache_key(SESSION_NAME)}.json"
+    path.write_text(content)
+
+    with pytest.raises(DiscoveryDataError, match="Malformed token cache"):
+        load_sso_token(SESSION_NAME, cache_dir=tmp_path)
+
+
+def test_naive_expires_at_is_treated_as_utc(tmp_path: Path):
+    future = datetime.now(timezone.utc) + timedelta(hours=8)
+    token_data = _make_token(future)
+    token_data["expiresAt"] = future.strftime("%Y-%m-%dT%H:%M:%S")
+    _write_token(tmp_path, SESSION_NAME, token_data)
+
+    assert load_sso_token(SESSION_NAME, cache_dir=tmp_path) == "valid-token-abc123"

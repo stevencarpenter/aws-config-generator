@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from aws_config_gen.types import GeneratorConfig, ProfileEntry
@@ -17,23 +18,43 @@ SECTION_PATTERN = re.compile(r"^\[(?P<section>[^\]]+)\]\s*$")
 def render_profiles(
     entries: list[ProfileEntry], generator_config: GeneratorConfig
 ) -> str:
-    """Render the full managed block including markers and all stanzas."""
+    """Render the full managed block including markers and all stanzas.
+
+    Each Identity Center gets its own ``[sso-session]`` stanza followed by the
+    profiles that use it, in the order the Identity Centers are configured.
+
+    Raises:
+        ValueError: If an entry references an ``sso_session`` that is not one
+            of the configured Identity Centers (it would otherwise be dropped).
+    """
+    known_sessions = {c.sso_session for c in generator_config.identity_centers}
+    unknown = sorted({e.sso_session for e in entries} - known_sessions)
+    if unknown:
+        msg = f"Profile entries reference unknown sso_session(s): {', '.join(unknown)}"
+        raise ValueError(msg)
+
     lines: list[str] = [BEGIN_MARKER]
 
-    # sso-session stanza
-    lines.append(f"[sso-session {generator_config.sso_session}]")
-    lines.append(f"sso_start_url = {generator_config.sso_start_url}")
-    lines.append(f"sso_region = {generator_config.sso_region}")
-    lines.append("sso_registration_scopes = sso:account:access")
+    for i, center in enumerate(generator_config.identity_centers):
+        if i > 0:
+            lines.append("")
 
-    # profile stanzas
-    for entry in entries:
-        lines.append("")
-        lines.append(f"[profile {entry.profile_name}]")
-        lines.append(f"sso_session = {entry.sso_session}")
-        lines.append(f"sso_account_id = {entry.account_id}")
-        lines.append(f"sso_role_name = {entry.role_name}")
-        lines.append(f"region = {entry.region}")
+        # sso-session stanza
+        lines.append(f"[sso-session {center.sso_session}]")
+        lines.append(f"sso_start_url = {center.sso_start_url}")
+        lines.append(f"sso_region = {center.sso_region}")
+        lines.append("sso_registration_scopes = sso:account:access")
+
+        # profile stanzas for this session
+        for entry in entries:
+            if entry.sso_session != center.sso_session:
+                continue
+            lines.append("")
+            lines.append(f"[profile {entry.profile_name}]")
+            lines.append(f"sso_session = {entry.sso_session}")
+            lines.append(f"sso_account_id = {entry.account_id}")
+            lines.append(f"sso_role_name = {entry.role_name}")
+            lines.append(f"region = {entry.region}")
 
     lines.append(END_MARKER)
     return "\n".join(lines) + "\n"
@@ -50,15 +71,32 @@ def _extract_section_names(content: str) -> set[str]:
 
 
 def _remove_sections(content: str, sections_to_remove: set[str]) -> str:
-    """Remove INI sections (header + body) whose name is in the set."""
+    """Remove INI sections (header + body) whose name is in the set.
+
+    Comment and blank lines at the end of a removed section are held back: if
+    a section header follows, they most likely describe that next section and
+    are kept; if a key line follows, they were part of the removed body. At
+    end of input they are kept, so no user comment is lost by guessing.
+    """
     out: list[str] = []
     skipping = False
+    pending: list[str] = []  # comment/blank lines seen while skipping
     for line in content.splitlines(keepends=True):
-        match = SECTION_PATTERN.match(line.strip())
+        stripped = line.strip()
+        match = SECTION_PATTERN.match(stripped)
         if match:
+            out.extend(pending)
+            pending = []
             skipping = match.group("section") in sections_to_remove
+        elif skipping:
+            if not stripped or stripped.startswith(("#", ";")):
+                pending.append(line)
+            else:
+                pending = []  # a key line: preceding comments were body
+            continue
         if not skipping:
             out.append(line)
+    out.extend(pending)
     # Collapse runs of blank lines left behind
     result = re.sub(r"\n{3,}", "\n\n", "".join(out))
     return result
@@ -145,8 +183,19 @@ def write_config(config_path: Path, generated_block: str) -> None:
     merged = merge_config(existing_content, generated_block)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = config_path.with_suffix(".tmp")
-    tmp_path.write_text(merged)
     target_mode = existing_mode if existing_mode is not None else 0o600
-    os.chmod(tmp_path, target_mode)
-    os.replace(tmp_path, config_path)
+    # mkstemp creates the file with mode 0o600, so the contents are never
+    # readable by other users, even briefly. The file lives next to the
+    # target so os.replace stays an atomic same-filesystem rename.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=config_path.parent, prefix=f".{config_path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as tmp_file:
+            tmp_file.write(merged)
+        os.chmod(tmp_path, target_mode)
+        os.replace(tmp_path, config_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise

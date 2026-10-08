@@ -7,6 +7,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from aws_config_gen.errors import DiscoveryDataError
+
 
 class TokenExpiredError(Exception):
     """Raised when the cached SSO token has expired."""
@@ -28,6 +30,7 @@ def load_sso_token(
     Raises:
         TokenNotFoundError: If the cache file does not exist.
         TokenExpiredError: If the token's expiresAt is in the past.
+        DiscoveryDataError: If the cache file is not valid token JSON.
     """
     if cache_dir is None:
         cache_dir = Path.home() / ".aws" / "sso" / "cache"
@@ -40,11 +43,23 @@ def load_sso_token(
         msg = f"No cached token for session '{session_name}': {cache_file}"
         raise TokenNotFoundError(msg)
 
-    data = json.loads(cache_file.read_text())
-    access_token: str = data["accessToken"]
-    expires_at_str: str = data["expiresAt"]
+    try:
+        data = json.loads(cache_file.read_text())
+        access_token = data["accessToken"]
+        expires_at_str = data["expiresAt"]
+        if not isinstance(access_token, str) or not isinstance(expires_at_str, str):
+            msg = "accessToken and expiresAt must be strings"
+            raise TypeError(msg)
+        expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+    except (ValueError, KeyError, TypeError) as exc:
+        # ValueError covers json.JSONDecodeError and bad ISO timestamps;
+        # TypeError covers a cache file that is not a JSON object.
+        msg = f"Malformed token cache for session '{session_name}': {cache_file} ({type(exc).__name__}: {exc})"
+        raise DiscoveryDataError(msg) from exc
 
-    expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+    if expires_at.tzinfo is None:
+        # Treat naive timestamps as UTC so the comparison below cannot raise.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= datetime.now(timezone.utc):
         msg = f"Token for session '{session_name}' expired at {expires_at_str}"
         raise TokenExpiredError(msg)

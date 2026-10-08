@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
+
 import pytest
 from pathlib import Path
 
 from aws_config_gen.config_writer import (
     BEGIN_MARKER,
     END_MARKER,
+    _remove_sections,
     merge_config,
     render_profiles,
     write_config,
 )
-from aws_config_gen.types import GeneratorConfig, ProfileEntry
+from aws_config_gen.types import GeneratorConfig, IdentityCenterConfig, ProfileEntry
 
 
-def _make_generator_config(**kwargs: object) -> GeneratorConfig:
+def _make_center(**kwargs: object) -> IdentityCenterConfig:
     defaults: dict[str, object] = {
         "sso_session": "test-session",
         "sso_start_url": "https://test.awsapps.com/start/#",
@@ -27,7 +30,11 @@ def _make_generator_config(**kwargs: object) -> GeneratorConfig:
         "skip": [],
     }
     defaults.update(kwargs)
-    return GeneratorConfig(**defaults)  # type: ignore[arg-type]
+    return IdentityCenterConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _make_generator_config(**kwargs: object) -> GeneratorConfig:
+    return GeneratorConfig(identity_centers=[_make_center(**kwargs)])
 
 
 def _make_entry(**kwargs: str) -> ProfileEntry:
@@ -89,6 +96,37 @@ def test_render_profiles_empty_entries():
     assert "[profile " not in result
     assert result.startswith(BEGIN_MARKER + "\n")
     assert result.endswith(END_MARKER + "\n")
+
+
+def test_render_profiles_multiple_identity_centers_grouped_by_session():
+    generator_config = GeneratorConfig(
+        identity_centers=[
+            _make_center(sso_session="acme", sso_start_url="https://acme/start"),
+            _make_center(
+                sso_session="beta",
+                sso_start_url="https://beta/start",
+                sso_region="eu-west-1",
+            ),
+        ]
+    )
+    # Sorted by profile name, interleaving sessions
+    entries = [
+        _make_entry(profile_name="a-beta", sso_session="beta"),
+        _make_entry(profile_name="b-acme", sso_session="acme"),
+    ]
+
+    result = render_profiles(entries, generator_config)
+
+    acme_idx = result.index("[sso-session acme]")
+    beta_idx = result.index("[sso-session beta]")
+    assert acme_idx < result.index("[profile b-acme]") < beta_idx
+    assert beta_idx < result.index("[profile a-beta]")
+    assert "sso_start_url = https://beta/start\nsso_region = eu-west-1" in result
+    # Stanzas are blank-line separated, no double blanks
+    assert "\n\n[sso-session beta]" in result
+    assert "\n\n\n" not in result
+    assert result.count(BEGIN_MARKER) == 1
+    assert result.count(END_MARKER) == 1
 
 
 def test_merge_config_replaces_existing_managed_block():
@@ -207,8 +245,7 @@ def test_write_config_atomic_no_tmp_leftover(tmp_path: Path):
 
     write_config(config_path, block)
 
-    tmp_file = config_path.with_suffix(".tmp")
-    assert not tmp_file.exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["config"]
     assert config_path.exists()
     assert config_path.read_text() == block
 
@@ -290,3 +327,91 @@ class TestMergeConfigCorruptedMarkers:
         content = f"{BEGIN_MARKER}\nstuff\nno end marker\n"
         with pytest.raises(ValueError, match="BEGIN marker found without matching END"):
             merge_config(content, "new block\n")
+
+
+def test_render_profiles_rejects_entries_for_unknown_sessions():
+    generator_config = _make_generator_config()
+    entries = [_make_entry(sso_session="not-configured")]
+
+    with pytest.raises(ValueError, match="unknown sso_session.*not-configured"):
+        render_profiles(entries, generator_config)
+
+
+def test_write_config_temp_file_is_never_world_readable(tmp_path: Path):
+    """The temp file must be 0o600 from creation, before any chmod."""
+    config_path = tmp_path / "config"
+    block = f"{BEGIN_MARKER}\nmanaged content\n{END_MARKER}\n"
+    seen_modes: list[int] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        seen_modes.append(os.stat(src).st_mode & 0o777)
+        real_replace(src, dst)
+
+    old_umask = os.umask(0o022)  # would yield 0o644 for a plain open()
+    try:
+        with (
+            patch("aws_config_gen.config_writer.os.chmod"),
+            patch("aws_config_gen.config_writer.os.replace", side_effect=spy_replace),
+        ):
+            write_config(config_path, block)
+    finally:
+        os.umask(old_umask)
+
+    assert seen_modes == [0o600]
+
+
+def test_write_config_cleans_up_temp_file_on_failure(tmp_path: Path):
+    config_path = tmp_path / "config"
+    config_path.write_text("[profile manual]\n")
+    block = f"{BEGIN_MARKER}\nmanaged content\n{END_MARKER}\n"
+
+    with (
+        patch("aws_config_gen.config_writer.os.replace", side_effect=OSError("boom")),
+        pytest.raises(OSError, match="boom"),
+    ):
+        write_config(config_path, block)
+
+    assert [p.name for p in tmp_path.iterdir()] == ["config"]
+    assert config_path.read_text() == "[profile manual]\n"
+
+
+def test_remove_sections_keeps_comment_describing_next_section():
+    content = (
+        "[profile prod]\n"
+        "region = us-east-1\n"
+        "\n"
+        "# this comment documents the keep profile below\n"
+        "[profile keep]\n"
+        "region = eu-west-1\n"
+    )
+
+    result = _remove_sections(content, {"profile prod"})
+
+    assert result == (
+        "\n# this comment documents the keep profile below\n"
+        "[profile keep]\n"
+        "region = eu-west-1\n"
+    )
+
+
+def test_remove_sections_drops_comments_inside_removed_body():
+    content = (
+        "[profile prod]\n"
+        "# old region, kept for reference\n"
+        "region = us-east-1\n"
+        "[profile keep]\n"
+        "region = eu-west-1\n"
+    )
+
+    result = _remove_sections(content, {"profile prod"})
+
+    assert result == "[profile keep]\nregion = eu-west-1\n"
+
+
+def test_remove_sections_keeps_trailing_comments_at_end_of_input():
+    content = "[profile keep]\nregion = eu-west-1\n[profile prod]\nregion = x\n; end\n"
+
+    result = _remove_sections(content, {"profile prod"})
+
+    assert result == "[profile keep]\nregion = eu-west-1\n; end\n"

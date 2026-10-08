@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from aws_config_gen.types import GeneratorConfig, SSOAccount
+from aws_config_gen.types import GeneratorConfig, IdentityCenterConfig, SSOAccount
 
 
 @pytest.fixture
-def sample_generator_config() -> GeneratorConfig:
-    return GeneratorConfig(
+def sample_identity_center() -> IdentityCenterConfig:
+    return IdentityCenterConfig(
         sso_session="test-session",
         sso_start_url="https://test.awsapps.com/start/#",
         sso_region="us-west-2",
@@ -24,6 +24,13 @@ def sample_generator_config() -> GeneratorConfig:
         },
         skip=[],
     )
+
+
+@pytest.fixture
+def sample_generator_config(
+    sample_identity_center: IdentityCenterConfig,
+) -> GeneratorConfig:
+    return GeneratorConfig(identity_centers=[sample_identity_center])
 
 
 @pytest.fixture

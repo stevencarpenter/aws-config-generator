@@ -28,7 +28,9 @@ class ProfileEntry:
 
 
 @dataclass(frozen=True)
-class GeneratorConfig:
+class IdentityCenterConfig:
+    """Settings for a single AWS Identity Center (one ``[sso-session]``)."""
+
     account_names: dict[str, str]
     role_short_names: dict[str, str]
     skip: list[tuple[str, str]]
@@ -36,3 +38,13 @@ class GeneratorConfig:
     sso_session: str
     sso_start_url: str
     sso_region: str
+    profile_prefix: str = ""
+
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    """Top-level generator config: one or more Identity Centers."""
+
+    identity_centers: list[IdentityCenterConfig]
+    # Non-fatal config problems (e.g. ignored keys) for the caller to report.
+    warnings: tuple[str, ...] = ()

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aws_config_gen.errors import DiscoveryDataError
 from aws_config_gen.sso_client import list_account_roles, list_accounts
 from aws_config_gen.types import SSOAccount
 
@@ -169,3 +170,74 @@ class TestListAccountRoles:
                 list_account_roles(TOKEN, REGION, "111111111111")
 
             assert exc_info.value.code == 403
+
+
+def _mock_raw_response(body: bytes) -> MagicMock:
+    resp = MagicMock()
+    resp.read.return_value = body
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<html>not json</html>",
+        b"[]",
+        json.dumps({"nextToken": None}).encode(),
+        json.dumps({"accountList": {"not": "a list"}}).encode(),
+        json.dumps({"accountList": [{"accountName": "no id"}]}).encode(),
+        json.dumps({"accountList": ["not-an-object"]}).encode(),
+    ],
+)
+def test_list_accounts_malformed_response_raises(body):
+    with patch("aws_config_gen.sso_client.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_raw_response(body)
+        with pytest.raises(DiscoveryDataError, match="Unexpected response"):
+            list_accounts(TOKEN, REGION)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{truncated",
+        json.dumps({"roleList": [{"accountId": "1"}]}).encode(),
+    ],
+)
+def test_list_account_roles_malformed_response_raises(body):
+    with patch("aws_config_gen.sso_client.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_raw_response(body)
+        with pytest.raises(DiscoveryDataError, match="Unexpected response"):
+            list_account_roles(TOKEN, REGION, "111111111111")
+
+
+@pytest.mark.parametrize(
+    "account",
+    [
+        {"accountId": "1111\n[profile x]", "accountName": "a", "emailAddress": "e"},
+        {"accountId": 111111111111, "accountName": "a", "emailAddress": "e"},
+    ],
+)
+def test_list_accounts_rejects_unsafe_account_id(account):
+    with patch("aws_config_gen.sso_client.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response({"accountList": [account]})
+        with pytest.raises(DiscoveryDataError, match="invalid accountId"):
+            list_accounts(TOKEN, REGION)
+
+
+@pytest.mark.parametrize("role_name", ["Admin\ncredential_process = x", "a b", ""])
+def test_list_account_roles_rejects_unsafe_role_name(role_name):
+    with patch("aws_config_gen.sso_client.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(
+            {"roleList": [{"roleName": role_name}]}
+        )
+        with pytest.raises(DiscoveryDataError, match="invalid roleName"):
+            list_account_roles(TOKEN, REGION, "111111111111")
+
+
+def test_list_account_roles_accepts_iam_role_charset():
+    name = "AWSReservedSSO_Admin+x=y,z.w@corp-1"
+    with patch("aws_config_gen.sso_client.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response({"roleList": [{"roleName": name}]})
+        assert list_account_roles(TOKEN, REGION, "111111111111") == [name]

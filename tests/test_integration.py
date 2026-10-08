@@ -271,3 +271,101 @@ def test_marker_based_merge_preserves_manual_content(integration_env):
     # Exactly one managed block
     assert content.count(BEGIN_MARKER) == 1
     assert content.count(END_MARKER) == 1
+
+
+def test_full_pipeline_multiple_identity_centers(tmp_path: Path):
+    """Two Identity Centers in different regions, each with its own token."""
+    fake_home = tmp_path / "home"
+    cache_dir = fake_home / ".aws" / "sso" / "cache"
+    cache_dir.mkdir(parents=True)
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    for session in ("acme", "beta"):
+        key = hashlib.sha1(session.encode()).hexdigest()
+        (cache_dir / f"{key}.json").write_text(
+            json.dumps({"accessToken": f"{session}-token", "expiresAt": expires_at})
+        )
+
+    generator_config_path = tmp_path / "config.json"
+    generator_config_path.write_text(
+        json.dumps(
+            {
+                "default_region": "us-west-2",
+                "role_short_names": {"AdministratorAccess": "admin"},
+                "identity_centers": [
+                    {
+                        "sso_session": "acme",
+                        "sso_start_url": "https://acme.awsapps.com/start",
+                        "sso_region": "us-east-1",
+                    },
+                    {
+                        "sso_session": "beta",
+                        "sso_start_url": "https://beta.awsapps.com/start",
+                        "sso_region": "eu-west-1",
+                        "profile_prefix": "beta",
+                    },
+                ],
+            }
+        )
+    )
+    config_path = tmp_path / "aws_config"
+    config_path.write_text(MANUAL_CONFIG)
+
+    # Each Identity Center (keyed by portal region + token) exposes its own accounts
+    accounts_by_token = {
+        ("us-east-1", "acme-token"): [ACCOUNTS[0]],
+        ("eu-west-1", "beta-token"): [ACCOUNTS[1]],
+    }
+
+    def _urlopen(req, **_kwargs):
+        region = req.full_url.split("portal.sso.")[1].split(".")[0]
+        token = req.get_header("X-amz-sso_bearer_token")
+        accounts = accounts_by_token[(region, token)]
+        url = req.full_url
+        if "/assignment/accounts" in url:
+            body = {"accountList": accounts}
+        else:
+            account_id = url.split("account_id=")[1].split("&")[0]
+            assert account_id in {a["accountId"] for a in accounts}
+            body = {"roleList": [{"roleName": r} for r in ROLES_BY_ACCOUNT[account_id]]}
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode()
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    with (
+        patch("aws_config_gen.sso_token.Path.home", return_value=fake_home),
+        patch(
+            "aws_config_gen.sso_client.urllib.request.urlopen",
+            side_effect=_urlopen,
+        ),
+    ):
+        rc = cli(
+            [
+                "--generator-config",
+                str(generator_config_path),
+                "--config",
+                str(config_path),
+            ]
+        )
+
+    assert rc == 0
+    content = config_path.read_text()
+
+    assert content.count(BEGIN_MARKER) == 1
+    assert (
+        "[sso-session acme]\nsso_start_url = https://acme.awsapps.com/start" in content
+    )
+    assert (
+        "[sso-session beta]\nsso_start_url = https://beta.awsapps.com/start" in content
+    )
+    assert "sso_region = us-east-1" in content
+    assert "sso_region = eu-west-1" in content
+    # acme: multi-role account, no prefix
+    assert "[profile alpha-corp-admin]\nsso_session = acme" in content
+    assert "[profile alpha-corp-readonlyplus]\nsso_session = acme" in content
+    # beta: single-role account, prefixed
+    assert "[profile beta-beta-inc]\nsso_session = beta" in content
+    assert "[profile manual-profile]" in content
